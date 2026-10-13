@@ -3,9 +3,25 @@
 A cruncher for Commodore 8-bit programs that trades unpacking time for
 size. By Nathan Butcher, driven by Claude Opus 5.5.
 
-On the nine released C64 games it was tested on, its self-extracting
-files are 7-17% smaller than Exomizer 3.1.2's at its best settings (11.0%
-overall). They also unpack 13-16 times more slowly: 35 to 70 seconds on a
+Grey goo is a hypothetical global catastrophic scenario involving molecular
+nanotechnology in which out-of-control self-replicating machines consume all
+biomass (and perhaps also everything else) on Earth while building many more
+of themselves, a scenario that has been called ecophagy. A perfect name for
+an AI slopped cruncher that packs everything so hard that it destroys your
+patience while waiting for the decrunch.
+
+TLDR: It's really just a freak-show curiosity. It beats everything in the
+crunched size department (yay!) and everything in the time to decrunch
+department (boo!). It's really only useful if storage space is at an extreme
+premium, you have a very fast Turbo (SuperCPU, Ultimate 64) or you don't mind
+waiting and putting some tea on.
+
+MEGA65 support was not built because I didn't have the ROM available to
+drive the emulator for Claude to use.
+
+On the seven released C64 games it was tested on, its self-extracting
+files are 7-14% smaller than Exomizer 3.1.2's at its best settings (10.9%
+overall). They also unpack 13-15 times more slowly: 35 to 70 seconds on a
 stock C64. On an Ultimate 64 or C64 Ultimate with its turbo registers
 enabled, the unpacker switches the turbo on while it works; there a 47 KB
 game unpacks in under a second once the turbo is running.
@@ -26,8 +42,8 @@ own 6502 assembler and simulator.
 - **On a fast machine:** an Ultimate 64 at 48-64 MHz, or a MEGA65 or a
   turbo card. There the time hardly matters.
 - **Not when a stock machine's waiting time matters.** Use Exomizer
-  there: the same 47 KB game unpacks in 4.1 s with it, 58 s with greygoo
-  (39 s with `--fast`).
+  there: a 51 KB game unpacks in 5.0 s with it, 68 s with greygoo
+  (45 s with `--fast`).
 
 ## Quick start
 
@@ -90,28 +106,28 @@ simulator, and every file was checked there byte for byte.
 | *Monaco GP 64*: Monaco GP | 51,069 | 25,188 (5.0 s) | 21,596 (67.6 s) | -14.3% |
 | *Monaco GP 64*: Pro Monaco GP | 51,104 | 25,845 (5.1 s) | 22,204 (69.3 s) | -14.1% |
 | *Shuttle Invader* 1.0 | 33,881 | 16,228 (3.2 s) | 14,752 (43.9 s) | -9.1% |
-| total | | 185,598 | 165,201 | -11.0% |
+| total | | 137,446 | 122,525 | -10.9% |
 
 These are finished, released games, each as its release build before any
-packing. All nine came out smaller with delta matches (*Re-encounter*
-would be 19,704 without them). With `--no-return` each is about 25 bytes
+packing. All seven came out smaller with delta matches (Monaco GP would
+be 22,087 without them). With `--no-return` each is about 25 bytes
 smaller. With `--fast` they unpack in about two-thirds of the time
-(*Re-encounter* in 39 s; 166,194 in total) for 95-120 bytes more each.
+(Monaco GP in 45 s; 123,282 in total) for 95-120 bytes more each.
 
-Other crunchers on the same nine: Dali 0.3.5 185,887 (1.6-2.9 s),
-Subsizer 0.6 190,050 (3.2-6.1 s), TSCrunch 1.3.1 223,571 (0.8-1.8 s).
-Raw streams on a mixed set (the nine programs, a Python source, English
+Other crunchers on the same seven: Dali 0.3.5 137,767 (1.6-2.9 s),
+Subsizer 0.6 140,719 (3.2-6.1 s), TSCrunch 1.3.1 166,524 (0.8-1.8 s).
+Raw streams on a mixed set (the seven programs, a Python source, English
 text):
 
 | | total |
 |---|---|
-| Exomizer 3.1.2 (best of four settings) | 215,297 |
-| Shrinkler, `-9` (Amiga intro packer, LZ + range coder) | 203,844 |
-| greygoo | 190,178 |
+| Exomizer 3.1.2 (best of four settings) | 167,892 |
+| Shrinkler, `-9` (Amiga intro packer, LZ + range coder) | 158,638 |
+| greygoo | 148,753 |
 
 **On real hardware** (a C64 Ultimate, PAL, with an earlier version's
-unpacker and a pre-release build of *Re-encounter*, 2026-09-29): with the
-turbo off, the game unpacked in 56.1 s, and all 46,774 bytes read back from the machine were identical to
+unpacker, 2026-09-29): with the turbo off, a 47 KB game unpacked in
+56.1 s, and all 46,774 bytes read back from the machine were identical to
 the original. With Turbo Control set to *U64 Turbo Registers* at 64 MHz,
 it took 3.1 s after a reset. The firmware kept the CPU at 1 MHz for the
 first 2.3 s, then the remaining 45 KB took 0.85 s. Every target in this
@@ -148,7 +164,7 @@ release was run in VICE (see Checks).
 
 ## Limits
 
-- 13-16 times slower than Exomizer on a stock machine (9-10 times with
+- 13-15 times slower than Exomizer on a stock machine (9-10 times with
   `--fast`).
 - On an unexpanded VIC-20 only small programs fit (about 1.5 KB), because
   the unpacker needs about 2 KB of its own.
@@ -211,18 +227,17 @@ spare) that the output never overwrites input not yet read.
 
 Everything below passed for this release.
 
-- **Real programs:** the nine above, packed and run in the simulator from
+- **Real programs:** the seven above, packed and run in the simulator from
   `SYS` to the program's start, then compared byte for byte. The
   simulator models each machine's banking. It stops with an error if code
-  ever runs outside RAM or reads a ROM where RAM was meant. Four of the
-  packed games (*Monaco GP*, *Asteroids Deluxe*, *Re-encounter*, *Battle
-  Royale*) were also run in VICE: unpacked byte for byte, and each game
-  started.
+  ever runs outside RAM or reads a ROM where RAM was meant. Two of the
+  packed games (Monaco GP and *Asteroids Deluxe*) were also run in VICE:
+  unpacked byte for byte, and each game started.
 - **Every target in VICE:** C64, C128, Plus/4, C16 and PET 4032, and the
   VIC-20 unexpanded and with 3 KB, 8 KB and all its expansions. Each
   packed program unpacked byte for byte, started and returned to BASIC
   (these runs used generated programs and the decoder without delta
-  matches; the one with them ran the four games above).
+  matches; the one with them ran the two games above).
   BASIC worked afterwards (floating point, strings, loops), and
   `--start basic` RUN a BASIC program on every machine.
 - **Edge cases:** programs reaching under the KERNAL and over the I/O
