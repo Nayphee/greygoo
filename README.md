@@ -19,7 +19,8 @@ waiting and putting some tea on. I wouldn't use it for stock Commodore systems
 and instead only for SuperCPU, Ultimate 64 turbo-only programs.
 
 MEGA65 support was not built because I didn't have the ROM available to
-drive the emulator for Claude to use.
+drive the emulator for Claude to use. Obviously Commander X16 and other
+Commodore-alike recreations would be good targets too. They just need support.
 
 On the seven released C64 games it was tested on, its self-extracting
 files are 7-14% smaller than Exomizer 3.1.2's at its best settings (10.9%
