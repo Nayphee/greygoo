@@ -10,11 +10,13 @@ of themselves, a scenario that has been called ecophagy. A perfect name for
 an AI slopped cruncher that packs everything so hard that it destroys your
 patience while waiting for the decrunch.
 
-TLDR: It's really just a freak-show curiosity. It beats everything in the
+TLDR: It's really just a freak-show curiosity of what happens when AI tries to
+build a cruncher for a retro-computer. Greygoo beats everything in the
 crunched size department (yay!) and everything in the time to decrunch
 department (boo!). It's really only useful if storage space is at an extreme
 premium, you have a very fast Turbo (SuperCPU, Ultimate 64) or you don't mind
-waiting and putting some tea on.
+waiting and putting some tea on. I wouldn't use it for stock Commodore systems
+and instead only for SuperCPU, Ultimate 64 turbo-only programs.
 
 MEGA65 support was not built because I didn't have the ROM available to
 drive the emulator for Claude to use.
