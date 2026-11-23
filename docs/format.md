@@ -1,7 +1,10 @@
 # The greygoo stream format (version 5)
 
 Everything here is what `greygoo.py` and `ggcoder.py` do and what
-`ggdec.asm` (and `ggdec-fast.asm`, the same format) decodes, bit for bit. Numbers with `$` are hexadecimal.
+`ggdec.asm` (and `ggdec-fast.asm`, the same format) decodes, bit for bit.
+Streams packed with `--speed 2` or `--speed 3` use the same tokens through
+a different coder: see *The table coder* at the end. Numbers with `$` are
+hexadecimal.
 
 ## Raw files
 
@@ -128,3 +131,60 @@ hist keeps two bits a token, shifted in from the right: L = 00, M = 10,
 R = 11, N = 01. isRep and isNear are read with hist already shifted by
 one 1 bit (by two for isNear), so their indices take in the token so far. Index 128 of pages 4 and 5 is a dummy that direct bits update and
 never read.
+
+## The table coder (`--speed 2` and `--speed 3`)
+
+The tokens, contexts and probabilities are the same but for what is said
+here. The arithmetic has no multiply, bits and bytes that are not
+compressed go past the coder, and the decoder is `ggdec-tab.asm`.
+
+**The stream** is a sequence of bytes that the decoder takes in order,
+each when it needs one, as one of two things:
+
+- a byte for its *bit buffer*, which hands out its 8 bits most
+  significant first (this is "the next stream bit" below: when the buffer
+  is empty, the next stream byte fills it);
+- a *raw byte*, used whole. What is left in the bit buffer stays there.
+
+The first byte is the code C. The second is the first bit buffer, and
+holds only 7 bits, over a 1 that carries nothing (the 6502's marker for
+the buffer's end). The encoder codes everything first and then lays the
+bytes out by replaying what the decoder will ask for.
+
+**The coder:** a range R and a code C, 8 bits each. R starts at 255.
+
+- **A decision** with probability p. First, while R < 128: R = R << 1,
+  C = (C << 1) | the next stream bit. (So a decision's bits are taken at
+  the start of the next decision, which fixes where they sit among the
+  other bytes.) Then lo = R with its low four bits cleared (the start of
+  R's cell: 128, 144, ... 240), and the split is
+  min(lo - 1, ((lo + 8) * p + 128) >> 8). If C < split, the bit is 0 and
+  R = split. Otherwise the bit is 1, C = C - split and R = R - split.
+- **Adaptive bits** update p exactly as above.
+- **Direct bits** are the next stream bit and nothing more.
+
+**The mantissa** of a value with top bit e: its first min(e, 3) bits are
+adaptive with context (the set, e, m AND 7), as above. The r bits left are
+direct bits, but when r is 8 or more the last 8 of them are one raw byte
+(the coded bits, that is the value's low byte inverted). There is no
+second run of adaptive bits for large values.
+
+**`--speed 3`** changes the token model, for fewer decisions:
+
+- a plain literal (after a literal) is a raw byte;
+- in a matched literal, the bits after the first one that differs from
+  the match byte are direct bits;
+- no mantissa bit is adaptive (r = e);
+- of the 4 bits of an offset's slot or a near byte's offset, the first two
+  go through the tree and the last two are direct bits.
+
+Pages 2 and 4 and the mantissa rows of page 5 go unused.
+
+The decoder builds three tables at its start, ten pages after the
+probabilities: p after a 0 bit, p after a 1 bit, and the splits less 1 for
+each of the eight cells (so one comparison with C decides the bit). It
+keeps the output pointer as a page and an index, so a copy is a loop over
+one index register.
+
+Against the 24-bit coder the 8-bit range costs nothing measurable and the
+cells about 0.15% of the stream; `--speed 3`'s model costs about 4%.

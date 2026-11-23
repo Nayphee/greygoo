@@ -13,6 +13,9 @@
      through ggget, in the simulator
   7. delta matches: a table-heavy program packed by ggsfx.py (it must
      choose them) and by greygoo.py --delta for the ggasm.py --delta decoder
+  8. the speed levels: ggsfx.py --speed 1, 2 and 3 on a generated program,
+     and greygoo.py --speed 2 and 3 streams through ggasm.py's decoders
+     (steps 2 and 3 take turns through the levels too)
 
 Copyright (c) 2026 Nathan Butcher, driven by Claude Opus 5.5. zlib licence: see LICENSE.
 """
@@ -93,9 +96,9 @@ def sys_program(rng, start, end):
     return bytes([start & 255, start >> 8]) + body
 
 
-def unpack_6502(data, stream, out):
-    body, place, ini = ggsfx.layout(stream, len(data), out)
-    src = ggsfx.decoder_src(0x02, 0xe000, place, 0xf200, ini, out + len(data))
+def unpack_6502(data, stream, out, speed=0):
+    body, place, ini = ggsfx.layout(stream, len(data), out, speed=speed)
+    src = ggsfx.decoder_src(0x02, 0xe000, place, 0xf200, ini, out + len(data), speed=speed)
     prg, syms = gg6502.assemble(src)
     c = gg6502.CPU()
     c.load(place, body)
@@ -126,22 +129,24 @@ def main():
     ok = True
     for i in range(24):
         kind, data = gen(rng)
-        s = GG.crunch(data, passes=2)
-        if GG.decode(s, len(data)) != data:
+        speed = (0, 2, 3)[i % 3]
+        s = GG.crunch(data, passes=2, speed=speed)
+        if GG.decode(s, len(data), speed) != data:
             ok = False
-            print('  round trip failed: %s, %d bytes' % (kind, len(data)))
-    report('Python round trips on 24 generated buffers', ok)
+            print('  round trip failed: %s, %d bytes, speed %d' % (kind, len(data), speed))
+    report('Python round trips on 24 generated buffers (speeds 0, 2, 3)', ok)
     # 3
     ok = True
     for i in range(8):
         kind, data = gen(rng)
         out = rng.choice([0x0200, 0x02ff, 0x0801, 0x10fe])
-        s = GG.crunch(data, passes=2)
-        good, cyc = unpack_6502(data, s, out)
+        speed = i % 4
+        s = GG.crunch(data, passes=2, speed=speed)
+        good, cyc = unpack_6502(data, s, out, speed)
         if not good:
             ok = False
-            print('  6502 unpack failed: %s, %d bytes at $%04x' % (kind, len(data), out))
-    report('the 6502 unpacker on 8 generated streams, in place', ok)
+            print('  6502 unpack failed: %s, %d bytes at $%04x, speed %d' % (kind, len(data), out, speed))
+    report('the 6502 unpackers on 8 generated streams, in place (speeds 0 to 3)', ok)
     with tempfile.TemporaryDirectory() as tmp:
         # 4
         for t, end in (('c64', 0x3000), ('c64', 0xa800), ('c128', 0x6000), ('plus4', 0x9000), ('vic20+8k', 0x3000),
@@ -223,6 +228,29 @@ def main():
         c.call(syms['drv'], limit=10 ** 9)
         report('the --delta decoder from ggasm.py on a --delta stream (%d bytes from 6000)' % len(st),
                bytes(c.mem[0x4000:0x4000 + len(tab)]) == tab and GG.has_delta(st, len(tab)))
+        # 8
+        prog = sys_program(rng, 0x0801, 0x4000)
+        for speed in (1, 2, 3):
+            good, dst, text = sfx(['--speed', str(speed)], [('', prog)], tmp)
+            report('ggsfx.py --speed %d on a generated program' % speed, good, text)
+        data = bytes(rng.choice(b'speed levels ') for _ in range(3000)) + code_like(rng, 2000)
+        src = os.path.join(tmp, 'spd.prg')
+        open(src, 'wb').write(bytes([0x00, 0x40]) + data)
+        for speed in (2, 3):
+            out = os.path.join(tmp, 'spd.%d' % speed)
+            subprocess.run([PY, os.path.join(ROOT, 'greygoo.py'), '-q', '--passes', '2', '--mem', '--speed', str(speed),
+                            src, out], check=True)
+            f = open(out, 'rb').read()
+            load = f[0] | f[1] << 8
+            lib = ggasm.source('mem', speed, zp=0x02, work=0xe000, org=0xc000)
+            drv = '*=$f800\ndrv     lda #<$%04x\n        ldx #>$%04x\n        jsr ggunpack\n        rts\n' % (load, load)
+            code, syms = gg6502.assemble(lib + '\n' + drv)
+            c = gg6502.CPU()
+            c.load(code[0] | code[1] << 8, code[2:])
+            c.load(load, f[2:])
+            c.call(syms['drv'], limit=10 ** 9)
+            report('the --speed %d decoder from ggasm.py on a --speed %d stream' % (speed, speed),
+                   bytes(c.mem[0x4000:0x4000 + len(data)]) == data)
     print('all passed' if not failures else '%d failed' % failures)
     sys.exit(1 if failures else 0)
 

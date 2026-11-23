@@ -61,6 +61,19 @@ MAXLEN = 65535
 KINDS = {'L': 0, 'M': 1, 'R': 2, 'N': 3}
 NEAR = 15               # a near byte's offsets: 1..NEAR (4 bits, 0 unused)
 NEARCLS = 3             # its slot tree's class
+SPEED = 0               # the speed level in use: set by crunch, decode and trace for their call
+
+
+def mant_adaptive(tag, e):
+    """the table coder's mantissas: how many of the e bits are adaptive"""
+    return 0 if lean() else min(e, 3)
+
+
+def lean():
+    """speed 3: plain literals are raw bytes; a matched literal's bits after
+    a mismatch, every mantissa bit and the lower two bits of an offset's
+    slot are bypass bits"""
+    return SPEED >= 3
 
 
 def offclass(L, e):
@@ -86,9 +99,23 @@ class Codec:
         """the e bits of v below its top 1 (or decoded): see the format"""
         m = self.m
         c_ = 0xfffe
+        if SPEED >= 2:
+            # the table coder's: the first 3 bits adaptive (none of an offset's at speed 3),
+            # the rest bypass bits, the last 8 of 8 or more as one raw byte
+            nad = mant_adaptive(tag, e)
+            for k in range(nad):
+                c = None if v is None else 1 - ((v >> (e - 1 - k)) & 1)
+                c_ = (2 * c_ + m.bit((tag, e, c_ & 7), c)) & 0xffff
+            r = e - nad
+            for k in range(r - 8 if r >= 8 else r):
+                c = None if v is None else 1 - ((v >> (r - 1 - k)) & 1)
+                c_ = (2 * c_ + m.direct(c, 1)) & 0xffff
+            if r >= 8:
+                c_ = (c_ << 8 | m.rawbyte(None if v is None else ~v & 255)) & 0xffff
+            return ~c_ & 0xffff
         for k in range(e):
             c = None if v is None else 1 - ((v >> (e - 1 - k)) & 1)
-            if (c_ & 255) >= 0xf8:
+            if (c_ & 255) >= 0xf8 and not (tag == 'om' and lean()):
                 c = m.bit((tag, e, c_ & 7), c)
             else:
                 c = m.direct(c, 1)
@@ -109,8 +136,16 @@ class Codec:
         self.elen = e
         return self._mant((ctx, 'm'), e, n)
 
+    def _slot(self, cls, v=None):
+        """4 bits through the slot tree of a class (speed 3: its lower two
+        are bypass bits)"""
+        if not lean():
+            return self.m.tree(('os', cls), v, 4)
+        hi = self.m.tree(('os', cls), None if v is None else v >> 2, 2)
+        return hi << 2 | self.m.direct(None if v is None else v & 3, 2)
+
     def _offset(self, cls, o=None):
-        e = self.m.tree(('os', cls), None if o is None else o.bit_length() - 1, 4)
+        e = self._slot(cls, None if o is None else o.bit_length() - 1)
         return self._mant('om', e, o)
 
     def _literal(self, c=None):
@@ -120,12 +155,18 @@ class Codec:
         node = 1
         matched = self.hist[1] != 0 and pos >= self.reps[0]
         mb = out[pos - self.reps[0]] if matched else 0
+        if lean() and not matched:              # (speed 3: a plain literal is a raw byte)
+            out.append(m.rawbyte(c))
+            self.hist = (self.hist[1], 0)
+            return
         for i in range(7, -1, -1):
             b = None if c is None else (c >> i) & 1
             if matched:
                 mbit = (mb >> i) & 1
                 b = m.bit(('ml', lctx, mbit, node), b)
                 matched = b == mbit
+            elif lean():
+                b = m.direct(b, 1)
             else:
                 b = m.bit(('lit', lctx, node), b)
             node = node << 1 | b
@@ -145,7 +186,7 @@ class Codec:
         isRep = m.bit(('isRep', h), None if tok is None else int(tok[0] in 'RND'))
         isNear = 0 if isRep == 0 else m.bit(('isNear', h), None if tok is None else int(tok[0] in 'ND'))
         if isNear:
-            o = m.tree(('os', NEARCLS), None if tok is None else (0 if tok[0] == 'D' else tok[1]), 4)
+            o = self._slot(NEARCLS, None if tok is None else (0 if tok[0] == 'D' else tok[1]))
             if o == 0:
                 # a delta match: a new match's length and offset, then the delta
                 L = self._length('len', None if tok is None else tok[1] - 1) + 1
@@ -186,10 +227,25 @@ class Codec:
         return ('M', L, o) if kind == 1 else ('R', L, j)
 
 
+class at_speed:
+    """with at_speed(n): the coder and model of speed level n"""
+
+    def __init__(self, speed):
+        self.speed = speed
+
+    def __enter__(self):
+        global SPEED
+        self.keep, SPEED = SPEED, self.speed
+
+    def __exit__(self, *a):
+        global SPEED
+        SPEED = self.keep
+
+
 def encode(data, tokens, events=None):
     """the stream for tokens; events (a list) gets (position, context, bit)
     for every adaptive decision"""
-    enc = G.Encoder()
+    enc = G.coders(SPEED)[0]()
     m = G.Model(enc)
     cod = Codec(m)
     if events is not None:
@@ -205,47 +261,41 @@ def encode(data, tokens, events=None):
     return enc.finish()
 
 
-def decode(stream, n):
-    dec = G.Decoder(stream)
-    cod = Codec(G.Model(dec))
-    while len(cod.out) < n:
-        cod.token()
-    return bytes(cod.out[:n])
+def decode(stream, n, speed=0):
+    with at_speed(speed):
+        dec = G.coders(speed)[1](stream)
+        cod = Codec(G.Model(dec))
+        while len(cod.out) < n:
+            cod.token()
+        return bytes(cod.out[:n])
 
 
-def has_delta(stream, n):
+def has_delta(stream, n, speed=0):
     """whether the stream uses delta matches (and so needs a decoder with them)"""
-    dec = G.Decoder(stream)
-    cod = Codec(G.Model(dec))
-    while len(cod.out) < n:
-        cod.token()
-    return cod.deltas > 0
+    with at_speed(speed):
+        dec = G.coders(speed)[1](stream)
+        cod = Codec(G.Model(dec))
+        while len(cod.out) < n:
+            cod.token()
+        return cod.deltas > 0
 
 
-def fetched(shifts):
-    """stream bytes the 6502 decoder has read after this many normalising
-    shifts: the first two (in its start table), then one every 8 shifts,
-    the first at the first shift"""
-    return 2 + (shifts + 7) // 8
-
-
-def trace(stream, n):
+def trace(stream, n, speed=0):
     """decode as the 6502 does and measure it for unpacking in place:
     (data, excess, total): each output byte k is written after its token
-    is decoded, when fetched(shifts) stream bytes have been read (the
-    6502 normalises at the start of a decision, so the token's last
-    decision's shifts are still to come); excess
-    is the largest k - fetched there (the stream must start more than
+    is decoded, when the decoder's fetched() stream bytes have been read;
+    excess is the largest k - fetched there (the stream must start more than
     that far past the output's start: see ggsfx.py), total the stream
     bytes read in all (the stream is padded with zeros to that)"""
-    dec = G.Decoder(stream)
-    cod = Codec(G.Model(dec))
-    excess = -1 << 30
-    while len(cod.out) < n:
-        cod.token()
-        k = len(cod.out) - 1
-        excess = max(excess, k - fetched(dec.nshift - dec.last))
-    return bytes(cod.out[:n]), excess, fetched(dec.nshift - dec.last)
+    with at_speed(speed):
+        dec = G.coders(speed)[1](stream)
+        cod = Codec(G.Model(dec))
+        excess = -1 << 30
+        while len(cod.out) < n:
+            cod.token()
+            k = len(cod.out) - 1
+            excess = max(excess, k - dec.fetched())
+        return bytes(cod.out[:n]), excess, dec.fetched()
 
 
 # ------------------------------------------------------------------ prices
@@ -284,7 +334,9 @@ class Prices:
             r, c_ = 0.0, 0xfffe
             for k in range(e):
                 c = 1 - ((v >> (e - 1 - k)) & 1)
-                if (c_ & 255) >= 0xf8:
+                if SPEED >= 2:
+                    r += self.bit((tag, e, c_ & 7), c) if k < mant_adaptive(tag, e) else 1
+                elif (c_ & 255) >= 0xf8 and not (tag == 'om' and lean()):
                     r += self.bit((tag, e, c_ & 7), c)
                 else:
                     r += 1
@@ -311,7 +363,7 @@ class Prices:
             node = 1
             for i in range(3, -1, -1):
                 b = (e >> i) & 1
-                v += self.bit((('os', cls), node), b)
+                v += self.bit((('os', cls), node), b) if i >= 2 or not lean() else 1
                 node = node << 1 | b
             v += self.mant('om', e, o)
             self.cache[key] = v
@@ -336,7 +388,7 @@ class Prices:
             v, node = 0.0, 1
             for i in range(3, -1, -1):
                 b = (o >> i) & 1
-                v += self.bit((('os', NEARCLS), node), b)
+                v += self.bit((('os', NEARCLS), node), b) if i >= 2 or not lean() else 1
                 node = node << 1 | b
             self.cache[key] = v
         return v
@@ -354,6 +406,8 @@ class Prices:
                     mbit = (mb >> i) & 1
                     v += self.bit(('ml', lctx, mbit, node), b)
                     matched = b == mbit
+                elif lean():
+                    v += 1
                 else:
                     v += self.bit(('lit', lctx, node), b)
                 node = node << 1 | b
@@ -591,19 +645,23 @@ SHIFT, WINDOW, PRIOR = 11, 1, 16.0
 
 
 def crunch(data, passes=int(os.environ.get('GG_PASSES', '6')), K=int(os.environ.get('GG_K', '8')), verbose=False,
-           max_offset=None, max_length=None, delta=False):
+           max_offset=None, max_length=None, delta=False, speed=0):
     """parse and encode, pricing each parse by the statistics of the last
     encode: the first by neutral guesses, the second by the whole file's
     counts, the rest by local counts (blocks of 2^SHIFT bytes); the
     smallest stream wins; max_offset, max_length: limits on new matches
     (and on repeats' lengths); delta: allow delta matches (the decoder
-    must have them: has_delta says whether the stream came to use any)"""
+    must have them: has_delta says whether the stream came to use any);
+    speed: the level the stream is for (0 and 1: the same stream; 2: the
+    table coder; 3: with offsets' mantissas and plain literals as bypass
+    bits)"""
     global MAXLEN
     keep = MAXLEN
     if max_length is not None:
         MAXLEN = max(2, min(MAXLEN, max_length))
     try:
-        return _crunch(data, passes, K, verbose, max_offset, delta)
+        with at_speed(speed):
+            return _crunch(data, passes, K, verbose, max_offset, delta)
     finally:
         MAXLEN = keep
 
@@ -644,7 +702,7 @@ def main():
         description='greygoo: pack or unpack a raw stream (2-byte length, then the stream, zero padded as far as '
                     'the 6502 decoder reads), or a stream for your own code: --mem (a .prg that loads where it '
                     'unpacks in place) or --level (the same bytes for a loader to feed); see ggasm.py')
-    ap.add_argument('-d', action='store_true', help='unpack (a raw stream)')
+    ap.add_argument('-d', action='store_true', help='unpack (a raw stream; with the --speed it was packed for)')
     ap.add_argument('inp', help='the input: raw bytes, or a .prg with --mem/--level (its load address the '
                                 'destination unless --dest)')
     ap.add_argument('out')
@@ -657,6 +715,9 @@ def main():
     ap.add_argument('--delta', action='store_true',
                     help='allow delta matches (copies with a constant added: tables, ramps); the decoder '
                          'must have them (ggasm.py --delta) if the stream comes to use any')
+    ap.add_argument('--speed', type=int, choices=(0, 1, 2, 3), default=0, metavar='N',
+                    help='the speed level the stream is for (as ggsfx.py --speed): 0 and 1 the same stream; '
+                         '2 and 3 for the table decoder (ggasm.py --speed 2 or 3, the same level)')
     ap.add_argument('--max-offset', type=num, default=None, help='the longest match offset')
     ap.add_argument('--max-length', type=num, default=None, help='the longest match')
     ap.add_argument('-q', action='store_true', help='quiet')
@@ -664,7 +725,7 @@ def main():
     if a.d:
         raw = open(a.inp, 'rb').read()
         n = raw[0] | raw[1] << 8
-        open(a.out, 'wb').write(decode(raw[2:], n))
+        open(a.out, 'wb').write(decode(raw[2:], n, a.speed))
         return
     data = open(a.inp, 'rb').read()
     dest = a.dest
@@ -675,11 +736,11 @@ def main():
     if not 1 <= len(data) <= 65535:
         sys.exit('greygoo: the input must be 1 to 65535 bytes')
     kw = {} if a.passes is None else {'passes': a.passes}
-    stream = crunch(data, verbose=not a.q, max_offset=a.max_offset, max_length=a.max_length, delta=a.delta, **kw)
+    stream = crunch(data, verbose=not a.q, max_offset=a.max_offset, max_length=a.max_length, delta=a.delta, speed=a.speed, **kw)
     if a.delta and not a.q:
         print('delta matches: %s' % ('used: unpack with a decoder that has them (ggasm.py --delta)'
-                                     if has_delta(stream, len(data)) else 'none used: any decoder unpacks it'))
-    back, excess, total = trace(stream, len(data))
+                                     if has_delta(stream, len(data), a.speed) else 'none used: any decoder unpacks it'))
+    back, excess, total = trace(stream, len(data), a.speed)
     assert back == data, 'round trip failed'
     padded = stream + bytes(max(0, total - len(stream)))
     if a.mem or a.level:

@@ -321,7 +321,7 @@ def assemble(source):
         if syms != known:
             changed = True
         known = syms
-        if not changed and npass >= 1:
+        if not changed and npass >= 2:      # (a pass past the first stable one: only it reports errors)
             break
     else:
         raise AsmError('the symbols never settled')

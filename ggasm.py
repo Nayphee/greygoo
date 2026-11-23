@@ -4,7 +4,7 @@ ggasm.py - greygoo's decoder as source to put in your own program:
 
     python3 ggasm.py -o ggunpack.asm                    # streams in memory
     python3 ggasm.py --input get -o ggunpack.asm        # bytes from your routine
-    python3 ggasm.py --fast --zp '$02' --work '$c000' --org '$c800' -o ggunpack.asm
+    python3 ggasm.py --speed 2 --zp '$02' --work '$a000' --org '$c000' -o ggunpack.asm
     python3 ggasm.py --syntax acme -o ggunpack.a
 
 Streams come from greygoo.py --mem (a .prg that loads where it unpacks in
@@ -20,12 +20,16 @@ end (2 bytes each, low first), then the stream.
 
 The routine returns when the destination is full. On every new output page
 it calls ggpage if you give --hook (keep y and c), for an effect or a
-loader's bookkeeping. It needs the zero page from --zp (23 bytes; 2 more
-with --fast, 1 more with --delta), the work area from --work (6 pages
-from an even page; 4 more with --fast, 1 more with --delta) and itself
-at --org (about 545 bytes; 95 more with --fast, 40 more with --delta).
+loader's bookkeeping. It needs the zero page from --zp (23 bytes; 25 with
+--speed 1, 21 with --speed 2 or 3; 1 more with --delta), the work area
+from --work (from an even page: 6 pages; 10 with --speed 1, 16 with
+--speed 2 or 3; 1 more with --delta) and itself at --org (about 545
+bytes; about 100 more with --speed 1, 170 with --speed 2, 140 with
+--speed 3; 40 more with --delta).
 Interrupts may stay on; the decoder touches no I/O. --delta is for
-streams packed with greygoo.py --delta.
+streams packed with greygoo.py --delta. --speed must be the level the
+stream was packed for (greygoo.py --speed), except that 0 and 1 unpack
+the same streams.
 
 Syntax: greygoo (also CBM prg Studio's: the c64-assembly skill's
 asm6502.py assembles it), acme or ca65 (translated; not assembled here).
@@ -94,33 +98,28 @@ ggini   byte $80,$ff,0,0,0,0,0,0,0,>ggwork,0,0
 """
 
 
-def variant(src, delta):
-    """the decoder's source with or without delta matches (as ggsfx.variant)"""
-    out = []
-    for line in src.split('\n'):
-        if '{delta}' in line:
-            if not delta:
-                continue
-            line = line.replace(' {delta}', '').replace('{delta}', '').rstrip()
-        elif '{nodelta}' in line:
-            if delta:
-                continue
-            line = line.replace(' {nodelta}', '').replace('{nodelta}', '').rstrip()
-        out.append(line)
-    return '\n'.join(out)
+import ggsfx
+variant = ggsfx.variant
 
 
-def source(inp='mem', fast=False, zp=0x55, work=0xc000, org=0xc800, hook=False, delta=False):
+def source(inp='mem', speed=0, zp=0x55, work=0xc000, org=0xc800, hook=False, delta=False):
     """the decoder for your program, in greygoo's (prg Studio) syntax"""
-    dec = variant(open(find('ggdec-fast.asm' if fast else 'ggdec.asm')).read(), delta)
+    speed = int(speed)          # (True, from older callers: 1)
+    dec = variant(open(find(ggsfx.DECODERS[speed])).read(), delta, speed >= 3)
     # the end from the header, not an assembly-time constant
-    for a, b in (('cmp #<ggend', 'cmp gghdr+2'), ('sbc #>ggend', 'sbc gghdr+3')):
+    for a, b in (('cmp #<ggend', 'cmp gghdr+2'), ('sbc #>ggend' if speed < 2 else 'cmp #>ggend',
+                                                  'sbc gghdr+3' if speed < 2 else 'cmp gghdr+3')):
         assert dec.count(a) == 1
         dec = dec.replace(a, b)
     if inp == 'get':
-        old = re.search(r'rdin    lda ggstream.*?\n@r      sec', dec, re.S).group(0)
-        dec = dec.replace(old, 'rdin    jsr ggget               ; (the next stream byte: x and y kept)\n        sec')
-    head = ('; greygoo decoder (ggasm.py): input %s%s%s\n' % (inp, ', fast' if fast else '',
+        if speed >= 2:
+            old = re.search(r'rdin    lda ggstream.*?\n@r      bcc @x', dec, re.S).group(0)
+            dec = dec.replace(old, 'rdin    php                     ; (the next stream byte: x and y kept)\n'
+                                   '        jsr ggget\n        plp\n        bcc @x')
+        else:
+            old = re.search(r'rdin    lda ggstream.*?\n@r      sec', dec, re.S).group(0)
+            dec = dec.replace(old, 'rdin    jsr ggget               ; (the next stream byte: x and y kept)\n        sec')
+    head = ('; greygoo decoder (ggasm.py): input %s%s%s\n' % (inp, ', speed %d' % speed if speed else '',
                                                               ', with delta matches' if delta else '')
             + 'ggzp = $%02x\nggilen = 12\nggwork = $%04x\nggstream = $ffff          ; (patched: above $ff, so lda stays absolute)\n*=$%04x\n' % (zp, work, org))
     hook_src = '' if hook else 'gghook  rts                     ; (no page hook: --hook calls ggpage)\n'
@@ -168,19 +167,29 @@ def main():
     num = lambda v: int(v[1:], 16) if v.startswith('$') else int(v, 0)
     ap.add_argument('-o', dest='out', help='the output file (default: standard output)')
     ap.add_argument('--input', choices=('mem', 'get'), default='mem')
-    ap.add_argument('--fast', action='store_true', help='the quarter-square decoder (1.5 times as fast, 10 pages)')
+    ap.add_argument('--speed', type=int, choices=ggsfx.SPEEDS, default=0, metavar='N',
+                    help='the decoder for a speed level (as ggsfx.py --speed): 1 unpacks the same streams as 0; '
+                         '2 and 3 need streams packed with greygoo.py --speed 2 or 3')
     ap.add_argument('--zp', type=num, default=0x55, help='its zero page (default $55)')
-    ap.add_argument('--work', type=num, default=0xc000, help='its work area, from an even page (default $c000)')
-    ap.add_argument('--org', type=num, default=0xc800, help='where it goes (default $c800)')
+    ap.add_argument('--work', type=num, default=None,
+                    help='its work area, from an even page (default $c000; $a000 with --speed 2 or 3)')
+    ap.add_argument('--org', type=num, default=None, help='where it goes (default $c800; $cc00 with --speed 1)')
     ap.add_argument('--hook', action='store_true', help='call your ggpage on every new output page')
     ap.add_argument('--delta', action='store_true',
                     help='with delta matches, for streams packed with greygoo.py --delta (40 bytes more, a '
                          'zero-page byte and a work page more)')
     ap.add_argument('--syntax', choices=('greygoo', 'prgstudio', 'acme', 'ca65'), default='greygoo')
     a = ap.parse_args()
+    if a.work is None:
+        a.work = 0xa000 if a.speed >= 2 else 0xc000
+    if a.org is None:
+        a.org = 0xcc00 if a.speed == 1 else 0xc800
     if a.work & 0x1ff:
         sys.exit('ggasm: the work area must start on an even page')
-    src = source(a.input, a.fast, a.zp, a.work, a.org, a.hook, a.delta)
+    wend = a.work + ggsfx.work_size(a.speed, a.delta)
+    if a.work < a.org + 0x300 and a.org < wend:
+        sys.exit('ggasm: the work area ($%04x-$%04x) and the decoder (at $%04x) overlap' % (a.work, wend - 1, a.org))
+    src = source(a.input, a.speed, a.zp, a.work, a.org, a.hook, a.delta)
     if a.syntax == 'acme':
         src = to_acme(src)
     elif a.syntax == 'ca65':

@@ -25,7 +25,8 @@ Exomizer's numbers work too: `-t 64`, `128`, `4`, `16`, `20`, `23`, `52`,
 
 Besides the program and its stream, the decoder needs about 2 KB: about
 520 bytes of code and 6 pages of work area, from an even page (a page
-more when the file uses delta matches, 4 more with `--fast`). `ggsfx.py` finds the room itself: above or below the
+more when the file uses delta matches; 4 more with `--speed 1`, 10 more
+with `--speed 2` or `3`). `ggsfx.py` finds the room itself: above or below the
 program, under the ROMs, the work area even under the I/O, the screen
 (blanked, then cleaned) as a last resort, or by folding part of the
 program into its own runs of one byte. On an unexpanded VIC-20, that

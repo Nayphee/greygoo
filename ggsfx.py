@@ -17,7 +17,8 @@ RAM, under its ROMs and I/O too.
 While it unpacks, the stream sits in place (just far enough above the
 program's start, as greygoo.trace measures, that the output never
 catches up with unread input), and the decoder and its work area (6
-pages; 10 with --fast) go wherever there is room: above or below the
+pages; 10 with --speed 1, 16 with --speed 2 or 3; one more with delta
+matches) go wherever there is room: above or below the
 program, under the ROMs, the work area even under the I/O. The layout
 chosen needs the least banking (ggtarget.py: on the C64 none, BASIC out,
 the KERNAL out too, all RAM; on the C128 the same through the MMU; on the
@@ -49,7 +50,8 @@ outside RAM. The time is for the machine at its normal clock.
 cruncher's) by running it in the simulator.
 
 Needs beside it: greygoo.py, ggcoder.py, gg6502.py, ggtarget.py,
-ggdec.asm (and ggdec-fast.asm for --fast).
+ggdec.asm (and ggdec-fast.asm for --speed 1, ggdec-tab.asm for --speed 2
+and 3).
 
 Copyright (c) 2026 Nathan Butcher, driven by Claude Opus 5.5. zlib licence: see LICENSE.
 """
@@ -68,35 +70,41 @@ def find_decoder(name):
                  if os.path.exists(p)), None)
 
 
-DECODER = find_decoder('ggdec.asm')
-FAST = find_decoder('ggdec-fast.asm')     # (--fast: the multiply by quarter squares)
+DECODERS = ('ggdec.asm', 'ggdec-fast.asm', 'ggdec-tab.asm', 'ggdec-tab.asm')
+SPEEDS = (0, 1, 2, 3)   # --speed: 0 the smallest file; 1 the multiply by quarter squares (the same stream);
+                        # 2 the table coder; 3 with plain literals raw and the least compressible bits as bypass bits
 
 
-def decoder_path(fast=False):
+def decoder_path(speed=0):
     if os.environ.get('GG_DEC'):                # (experiments: another decoder in src/)
         return os.path.join(HERE, '..', 'src', os.environ['GG_DEC'])
-    return FAST if fast else DECODER
+    return find_decoder(DECODERS[speed])
 
 
-def work_size(fast=False, delta=False):
+def work_size(speed=0, delta=False):
     """the decoder's work area in bytes: 6 pages of probabilities (7 with
-    delta matches), and 4 more for the fast decoder's quarter squares"""
-    return (0x700 if delta else 0x600) + (0x400 if 'sqlo' in open(decoder_path(fast)).read() else 0)
+    delta matches), 4 more for speed 1's quarter squares, 10 more for
+    the table coder's tables"""
+    return (0x700 if delta else 0x600) + (0, 0x400, 0xa00, 0xa00)[speed]
 
 
-def variant(src, delta):
-    """the decoder's source with or without delta matches: lines marked
-    {delta} or {nodelta} kept or dropped"""
+def zp_vars(speed=0, delta=False):
+    """the decoder's zero page variables after its start table"""
+    return (11, 13, 9, 9)[speed] + bool(delta)
+
+
+def variant(src, delta, lean=False):
+    """the decoder's source with or without delta matches, and (the table
+    decoder) for speed 3 or 2: lines marked {delta} / {nodelta} and
+    {lean} / {full} kept or dropped"""
+    drop = {'{nodelta}' if delta else '{delta}', '{full}' if lean else '{lean}'}
     out = []
     for line in src.split('\n'):
-        if '{delta}' in line:
-            if not delta:
-                continue
-            line = line.replace(' {delta}', '').replace('{delta}', '').rstrip()
-        elif '{nodelta}' in line:
-            if delta:
-                continue
-            line = line.replace(' {nodelta}', '').replace('{nodelta}', '').rstrip()
+        tags = [t for t in ('{delta}', '{nodelta}', '{lean}', '{full}') if t in line]
+        if any(t in drop for t in tags):
+            continue
+        for t in tags:
+            line = line.replace(' ' + t, '').replace(t, '').rstrip()
         out.append(line)
     return '\n'.join(out)
 
@@ -121,22 +129,22 @@ def assemble_src(src, name='ggtest'):
     return prg, syms
 
 
-def decoder_src(zp, work, stream_at, code_at, ini, end, head='', fast=False, delta=False):
+def decoder_src(zp, work, stream_at, code_at, ini, end, head='', speed=0, delta=False):
     """the decoder's source for one layout: equates, an entry that unpacks
     and returns (or the head given), the decoder, its start table"""
-    dec = decoder_path(fast)
+    dec = decoder_path(speed)
     return ('ggzp = $%02x\nggilen = %d\nggwork = $%04x\nggstream = $%04x\nggend = $%04x\n*=$%04x\n' % (
                 zp, len(ini), work, stream_at, end, code_at)
             + (head or 'entry   ldy #0\n        jsr ggdec\ngghook\nggdone  rts\n')
-            + variant(open(dec).read(), delta)
+            + variant(open(dec).read(), delta, speed >= 3)
             + '\nggini   byte %s\n' % ','.join(v if isinstance(v, str) else '$%02x' % v for v in ini))
 
 
-def layout(stream, n, out, extra=0):
+def layout(stream, n, out, extra=0, speed=0):
     """for unpacking n bytes in place at out: (the stream bytes to place
     (from the third, zero padded as far as the 6502 reads), their address,
     the start table)"""
-    data, excess, total = GG.trace(stream, n)
+    data, excess, total = GG.trace(stream, n, speed)
     body = stream + bytes(max(0, total - len(stream)))
     place = out + excess + 3 + extra
     ini = [GG.G.START >> 16, (GG.G.START >> 8) & 255, body[0], body[1], 0, 0, out & 255, out >> 8, 0, '>ggwork',
@@ -437,7 +445,7 @@ ggmover {enter}        ldy #0
 
 
 def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, hold=False, passes=None, mem=None,
-          sei=False, fast=False, text='', enter='', exit_='', effect='', max_offset=None, max_length=None,
+          sei=False, speed=0, text='', enter='', exit_='', effect='', max_offset=None, max_length=None,
           basic_end_ptrs=True, delta='auto'):
     """the packed file for target t and facts about it. pieces: [(load
     address, bytes)], merged in order. start: 'sys' (the first file's SYS
@@ -447,9 +455,11 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
     loop instead of starting the program (for reading the unpacked memory
     back from real hardware); mem: the memory configuration for the program
     (the target's default; without the KERNAL, interrupts stay off); sei:
-    interrupts off for the program anyway; fast: the decoder that multiplies
-    by quarter squares (about 1.5 times as fast, 91 bytes more, a 10-page
-    work area); text: PETSCII after the SYS number; enter, exit_, effect:
+    interrupts off for the program anyway; speed: 0 the smallest file, 1 the
+    same stream unpacked by a quarter-square multiply (about 1.5 times as
+    fast), 2 the table coder (about 2.7 times), 3 the table coder with
+    plain literals as raw bytes and the least compressible bits as bypass
+    bits (about 4.5 times, some 5% bigger); text: PETSCII after the SYS number; enter, exit_, effect:
     assembly run as the stub starts, before the program starts (with the
     I/O in) and on every output page (with the I/O in; keep y and c);
     basic_end_ptrs: leave BASIC as the program's own LOAD would: its
@@ -507,8 +517,8 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
 
     def crunch(img):
         kw = {} if passes is None else {'passes': passes}
-        st_ = GG.crunch(img, max_offset=max_offset, max_length=max_length, delta=D[0], **kw)
-        assert GG.decode(st_, len(img)) == img, 'the stream does not decode'
+        st_ = GG.crunch(img, max_offset=max_offset, max_length=max_length, delta=D[0], speed=speed, **kw)
+        assert GG.decode(st_, len(img), speed) == img, 'the stream does not decode'
         return st_
 
     turbo_on = turbo and t.turbo is not None
@@ -650,21 +660,21 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
                            ioout=m.io_out, greys=greys, far='')
 
     zp = t.zp
-    ZPBUDGET = t.zp_budget  # (the decoder's start table and variables: 23, 25 with --fast; the trampoline after)
+    ZPBUDGET = t.zp_budget  # (the decoder's start table and variables: 23, fewer or more by --speed; the trampoline after)
 
     def dec_src(lay, ini, fold, tramp_at):
         tramp = []
         if needs_tramp(lay) and not fold and not hold and tramp_at == zp + 12:
             tramp = tramp_bytes(lay, fold)
         src = decoder_src(zp, lay['W'][0], lay['S'][0], lay['D'][0], ini + tramp, lay['o'][1],
-                          head=tail_src(lay, fold, tramp_at), fast=fast, delta=D[0])
+                          head=tail_src(lay, fold, tramp_at), speed=speed, delta=D[0])
         try:
             gg6502.assemble(src + ('\nggmover = $%04x\n' % t.mover[0] if fold else ''))
         except gg6502.AsmError as e:
             if 'out of range' not in str(e):
                 raise
             src = decoder_src(zp, lay['W'][0], lay['S'][0], lay['D'][0], ini + tramp, lay['o'][1],
-                              head=tail_src(lay, fold, tramp_at, far=True), fast=fast, delta=D[0])
+                              head=tail_src(lay, fold, tramp_at, far=True), speed=speed, delta=D[0])
         return src
 
     def tramp_where(lay, fold):
@@ -673,7 +683,7 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
         if fold or hold or not (needs_tramp(lay) or late(lay)):
             return None
         tb_ = tramp_bytes(lay, fold)
-        if not late(lay) and 12 + len(tb_) + 11 + 2 * bool(fast) + D[0] <= ZPBUDGET:
+        if not late(lay) and 12 + len(tb_) + zp_vars(speed, D[0]) <= ZPBUDGET:
             return zp + 12
         size = len(gg6502.assemble(exit_src(lay, t.mover[0]))[0]) - 2
         return t.mover[1] - size
@@ -759,13 +769,14 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
     while len(assemble_src(mover_src(big, [(0x1000, 0x2000, 1, 0)] * (mvmax_pieces + 1)),
                            'ggsfx-mover')[0]) - 2 <= t.mover[1] - t.mover[0]:
         mvmax_pieces += 1
-    stub_max = len(assemble_src(stub_src(big, [('x', 0x1000, 0x2000, 300)] * 4), 'ggsfx-stub')[0]) - 2
+    stub_max = len(assemble_src(stub_src(big, [('x', 0x1000, 0x2000, 300)] * 4)
+                                + '\nggdec = $ffff\nggturb = $ffff\nggbord = $ffff\nggscr = $ffff\n', 'ggsfx-stub')[0]) - 2
     stub_end = t.basic_start + stub_max
 
     def finish(lay, stream, fold, pieces_):
         """assemble the decoder (and the mover, the trampoline), order the
         moves, the file"""
-        body, place, ini = layout(stream, lay['o'][1] - lay['o'][0], lay['o'][0])
+        body, place, ini = layout(stream, lay['o'][1] - lay['o'][0], lay['o'][0], speed=speed)
         assert place <= lay['S'][0]
         tramp_at = tramp_where(lay, fold)
         code, lab = assemble_src(dec_src(lay, ini, fold, tramp_at)
@@ -789,7 +800,9 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
                 merged.append((what, at, b))
         # the stub's size depends on its moves (their count and directions),
         # which depend on where the stub ends: settle it by iterating
-        blk = t.basic_start + (len(assemble_src(stub_src(lay, [(w, 0x1000, a, len(b)) for w, a, b in merged]),
+        defs = ('\nggdec = $%04x\n' % lab['ggdec']
+                + ''.join('%s = $%04x\n' % (k, lab[k]) for k in ('ggturb', 'ggbord', 'ggscr') if k in lab))
+        blk = t.basic_start + (len(assemble_src(stub_src(lay, [(w, 0x1000, a, len(b)) for w, a, b in merged]) + defs,
                                                 'ggsfx-stub')[0]) - 2)
         for attempt_ in range(6):
             srcs, at = [], blk
@@ -812,9 +825,7 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
                     break
             if order is None:
                 return None
-            stub, slab = assemble_src(stub_src(lay, order) + '\nggdec = $%04x\n' % lab['ggdec']
-                                      + ''.join('%s = $%04x\n' % (k, lab[k]) for k in ('ggturb', 'ggbord', 'ggscr')
-                                                if k in lab), 'ggsfx-stub')
+            stub, slab = assemble_src(stub_src(lay, order) + defs, 'ggsfx-stub')
             if slab['blk'] == blk:
                 break
             blk = slab['blk']
@@ -830,11 +841,11 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
         """plan and build for the image img unpacked into o"""
         if stream is None:
             stream = crunch(img)
-        _, excess, total = GG.trace(stream, len(img))
+        _, excess, total = GG.trace(stream, len(img), speed)
         L = max(total, len(stream)) - 2
         extra = [(load, end)] if fold else []
         reserved = [t.mover] if fold else []
-        lay = plan(t, o, o[0] + excess + 3, L, dmaxes[D[0]], stub_end, extra, work_size(fast, D[0]), reserved)
+        lay = plan(t, o, o[0] + excess + 3, L, dmaxes[D[0]], stub_end, extra, work_size(speed, D[0]), reserved)
         if lay is None:
             return None, stream
         lay['sei'] = lay['mode'].sei or overlap(o, t.system) or not t.kernal_after(mem) or sei
@@ -851,7 +862,7 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
         if res is None:
             # fold: free the top or the bottom of the program, its bytes stored
             # in runs inside the rest and put home by the mover at the end
-            _, excess, total = GG.trace(stream, n)
+            _, excess, total = GG.trace(stream, n, speed)
             L = max(total, len(stream)) - 2
             tries = []
             for side in ('top', 'bottom'):
@@ -864,7 +875,7 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
                     # (the stream ends about k lower when the top goes; where it did
                     # when the bottom goes)
                     guess = plan(t, o, load + excess + 3 - (k if side == 'top' else 0), L + 64, dmaxes[D[0]], stub_end,
-                                 [(load, end)], work_size(fast, D[0]), [t.mover])
+                                 [(load, end)], work_size(speed, D[0]), [t.mover])
                     if guess is not None:
                         tries.append(((guess['mode'].sei, guess['mode'].level, k), side, k))
                         break
@@ -894,7 +905,7 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
     else:
         D[0] = True
         res, fold, pieces_, st = pack()
-        if delta != 'on' and not (GG.has_delta(st, n)):
+        if delta != 'on' and not (GG.has_delta(st, n, speed)):
             D[0] = False
             res, fold, pieces_, _ = pack(None if fold else st)
         elif delta != 'on':
@@ -905,7 +916,9 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
             else:
                 D[0] = True
     if res is None:
-        sys.exit('ggsfx: no room for the decoder and its work area, even folding the program into its runs')
+        sys.exit('ggsfx: no room for the decoder and its work area, even folding the program into its runs'
+                 + (' (--speed %d needs %d pages of work area: a lower --speed needs less)' % (
+                     speed, work_size(speed, True) >> 8) if speed else ''))
     lay, (out, facts) = res
     in_size = sum(len(d) + 2 for a, d in pieces)
     if len(out) >= in_size:
@@ -927,7 +940,7 @@ def build(pieces, t='c64', start='sys', verbose=True, turbo=True, flash=True, ho
             print('  gaps filled with zeros: %s' % ', '.join(f(g) for g in gaps))
     return out, dict(target=t, load=load, n=n, entry=entry, data=data, stream=facts['stream'],
                      decoder=facts['decoder'], stub=facts['stub'], turbo=turbo, flash=flash, hold=hold,
-                     mode=lay['mode'], fold=fold, blank=lay['blank'], mem=mem, sei=sei, fast=fast, basic=basic,
+                     mode=lay['mode'], fold=fold, blank=lay['blank'], mem=mem, sei=sei, speed=speed, basic=basic,
                      sys=facts['sys'], cli=lay['cli'], seid=lay['sei'],
                      load_end=end & 0xffff if set_end else None, image=(load, end), delta=D[0])
 
@@ -997,8 +1010,9 @@ def desfx(prg, t='c64', limit=4 * 10 ** 9):
     """unpack a self-extracting file by running it in the simulator from
     its SYS: (load address, the unpacked bytes, the start address). The
     program is what code written by the loaded file wrote: the instruction
-    that wrote the most of it, and any in the stack page that wrote 16
-    bytes or more (a fold's mover; Exomizer's decruncher)"""
+    that wrote the most of it, what its neighbours wrote beside that, and
+    any in the stack page that wrote 16 bytes or more (a fold's mover;
+    Exomizer's decruncher)"""
     if isinstance(t, str):
         t = ggtarget.target(t)
     load = prg[0] | prg[1] << 8
@@ -1054,6 +1068,13 @@ def desfx(prg, t='c64', limit=4 * 10 ** 9):
     writers = {main_writer} | {w for w, c in counts.items() if 0x0100 <= w < 0x0200 and c >= 16}
     prog = [a for a in range(0x0200, 0x10000) if gen[a] >= 2 and writer[a] in writers]
     lo, hi = prog[0], prog[-1] + 1
+    # (a decoder with more than one store: literals by one, copies by another. What the main
+    # writer's neighbours wrote right beside its bytes belongs too)
+    near = lambda a: gen[a] >= 2 and abs(writer[a] - main_writer) < 256
+    while lo > 0x0200 and near(lo - 1):
+        lo -= 1
+    while hi < 0x10000 and near(hi):
+        hi += 1
     return lo, bytes(s.mem[lo:hi]), pc
 
 
@@ -1080,8 +1101,10 @@ def main():
                     help='the memory configuration for the program: $01 on the C64 (default $37), $ff00 on the '
                          'C128 (default 0), 0 or 1 (the ROMs in or out) on the Plus/4 and C16')
     ap.add_argument('--sei', action='store_true', help='start the program with interrupts off')
-    ap.add_argument('--fast', action='store_true',
-                    help='the faster decoder: about 1.5 times as fast, 91 bytes more, 4 more pages of work RAM')
+    ap.add_argument('--speed', type=int, choices=SPEEDS, default=0, metavar='N',
+                    help='faster unpacking for a bigger file: 0 (default) the smallest; 1 the same stream, about '
+                         '1.5 times as fast, about 100 bytes and 4 pages of work RAM more; 2 about 2.7 times as '
+                         'fast, about 200 bytes and 10 pages more; 3 about 4.5 times as fast, some 5%% bigger')
     ap.add_argument('--text', default='', help='text after the SYS number (shown by LIST)')
     ap.add_argument('--enter', default='', help='assembly (lines separated by ;) run first')
     ap.add_argument('--exit', default='', help='assembly run before the program starts (the I/O in)')
@@ -1116,7 +1139,7 @@ def main():
     start = a.start or ('$%04x' % a.entry if a.entry is not None else 'sys')
     pieces = [load_input(f) for f in files]
     out, info = build(pieces, t, start, turbo=not a.no_turbo, flash=not a.no_flash, hold=a.hold, passes=a.passes,
-                      mem=a.mem, sei=a.sei, fast=a.fast, text=a.text, enter=a.enter, exit_=a.exit, effect=a.effect,
+                      mem=a.mem, sei=a.sei, speed=a.speed, text=a.text, enter=a.enter, exit_=a.exit, effect=a.effect,
                       max_offset=a.max_offset, max_length=a.max_length, basic_end_ptrs=not a.no_return, delta=a.delta)
     if not a.no_check:
         ok, cyc = check(out, info)
